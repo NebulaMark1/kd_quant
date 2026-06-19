@@ -8,7 +8,6 @@ Investigating whether "remedial quantization" can match KD+QAT without running f
 |-------|--------|-----------------|
 | A | FP16 | Upper bound |
 | B | GPTQ W4A16 | Layer-wise output reconstruction |
-| C | AWQ W4A16 | Salient channel protection |
 | D | GPTQ + Offline KD (LoRA) | B + precomputed soft labels (no teacher at train time) |
 | E | GPTQ + Online KD (LoRA) | B + live teacher KL + CE (full KD baseline) |
 

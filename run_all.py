@@ -3,7 +3,6 @@
 Groups:
   A – FP16 (upper bound)
   B – GPTQ W4A16 (output reconstruction)
-  C – AWQ  W4A16 (salient-channel protection)
   D – GPTQ + offline KD  (our "remedial quantization" candidate)
   E – GPTQ + online KD   (true KD baseline)
 
@@ -36,7 +35,7 @@ def main():
     parser.add_argument("--skip-quant", action="store_true")
     parser.add_argument("--skip-kd", action="store_true")
     parser.add_argument("--skip-eval-fp16", action="store_true")
-    parser.add_argument("--groups", nargs="+", default=["A", "B", "C", "D", "E"])
+    parser.add_argument("--groups", nargs="+", default=["A", "B", "D", "E"])
     args = parser.parse_args()
 
     cfg = ExperimentConfig()
