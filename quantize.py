@@ -59,41 +59,48 @@ def _save_model(model: torch.nn.Module, tokenizer: PreTrainedTokenizer, path: st
 def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
     save_path = f"{cfg.models_dir}/gptq_w4a16"
 
-    if Path(save_path).exists() and (Path(save_path) / "config.json").exists():
+    if Path(save_path).exists() and (Path(save_path) / "quantize_config.json").exists():
+        from auto_gptq import AutoGPTQForCausalLM
         tokenizer = _load_tokenizer(cfg)
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(
-            save_path, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True,
+        model = AutoGPTQForCausalLM.from_quantized(
+            save_path, device_map="auto", use_triton=False,
         )
         model.eval()
         return QuantResult(model, save_path, "gptq")
 
-    try:
-        from optimum.gptq import GPTQQuantizer
-    except ImportError:
-        raise ImportError("optimum[gptq] required: pip install optimum[gptq] auto-gptq")
-
     tokenizer = _load_tokenizer(cfg)
-    model = _load_fp16_model(cfg)
+
+    from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
 
     calib_texts = [
         tokenizer.decode(s["input_ids"], skip_special_tokens=True)
         for s in calib_ds.select(range(min(cfg.calib_samples, len(calib_ds))))
     ]
 
-    quantizer = GPTQQuantizer(
+    quantize_config = BaseQuantizeConfig(
         bits=cfg.bits,
         group_size=cfg.group_size,
         desc_act=cfg.desc_act,
-        dataset=calib_texts,
     )
-    quantized = quantizer.quantize_model(model, tokenizer)
-    _save_model(quantized, tokenizer, save_path)
 
-    del model
+    gptq_model = AutoGPTQForCausalLM.from_pretrained(
+        cfg.model_name,
+        quantize_config=quantize_config,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True,
+        cache_dir=cfg.cache_dir,
+    )
+    gptq_model.quantize(calib_texts, use_triton=False)
+    gptq_model.save_quantized(save_path)
+    tokenizer.save_pretrained(save_path)
+
+    del gptq_model
     torch.cuda.empty_cache()
 
-    return QuantResult(quantized, save_path, "gptq")
+    gptq_model = AutoGPTQForCausalLM.from_quantized(save_path, device_map="auto", use_triton=False)
+    gptq_model.eval()
+    return QuantResult(gptq_model, save_path, "gptq")
 
 
 # ═══════════════════════════════════════════════════════════════════════
