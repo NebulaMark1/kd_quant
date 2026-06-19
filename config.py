@@ -34,7 +34,7 @@ class ExperimentConfig:
     kd_learning_rate: float = 2e-4
     kd_num_epochs: int = 1
     kd_max_steps: int = 500
-    kd_temperature: float = 3.0
+    kd_temperature: float = 1.0  # lower temp = less prone to NaN with fp16
     kd_alpha_kl: float = 0.5
     kd_train_samples: int = 3000
     kd_warmup_ratio: float = 0.05

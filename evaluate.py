@@ -82,7 +82,8 @@ def _normalize_answer_math(text: str) -> Optional[str]:
 
 @torch.no_grad()
 def _generate_one(model, tokenizer, prompt: str, cfg: ExperimentConfig) -> str:
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=cfg.kd_max_length - cfg.eval_max_new_tokens)
+    eval_max_input = 3072  # independent of kd_max_length
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=eval_max_input)
     inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
 
     outputs = model.generate(

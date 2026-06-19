@@ -191,14 +191,16 @@ def _lora_trainable_params(model: nn.Module) -> list[nn.Parameter]:
 
 
 def _compute_kd_loss(s_out, t_out, labels, cfg: ExperimentConfig) -> torch.Tensor:
+    s_logits = s_out.logits.float()
+    t_logits = t_out.logits.float()
     loss_ce = F.cross_entropy(
-        s_out.logits.view(-1, s_out.logits.size(-1)),
+        s_logits.view(-1, s_logits.size(-1)),
         labels.view(-1),
         ignore_index=-100,
     )
     mask = (labels.view(-1) != -100)
-    s_log = F.log_softmax(s_out.logits.view(-1, s_out.logits.size(-1))[mask] / cfg.kd_temperature, dim=-1)
-    t_soft = F.softmax(t_out.logits.view(-1, t_out.logits.size(-1))[mask] / cfg.kd_temperature, dim=-1)
+    s_log = F.log_softmax(s_logits.view(-1, s_logits.size(-1))[mask] / cfg.kd_temperature, dim=-1)
+    t_soft = F.softmax(t_logits.view(-1, t_logits.size(-1))[mask] / cfg.kd_temperature, dim=-1)
     loss_kl = F.kl_div(s_log, t_soft, reduction="batchmean") * (cfg.kd_temperature ** 2)
     return (1 - cfg.kd_alpha_kl) * loss_ce + cfg.kd_alpha_kl * loss_kl
 
