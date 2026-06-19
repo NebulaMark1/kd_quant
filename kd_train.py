@@ -45,7 +45,7 @@ class _GptqLoraLayer(nn.Module):
             dtype = torch.float16
         self.lora_A = nn.Linear(in_features, r, bias=False, dtype=dtype)
         self.lora_B = nn.Linear(r, out_features, bias=False, dtype=dtype)
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.normal_(self.lora_A.weight, std=0.01)
         nn.init.zeros_(self.lora_B.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -265,6 +265,11 @@ def _run_kd_training(cfg, train_ds, quant_result, teacher, label, shuffle, extra
             accumulation_loss += loss.item()
 
             if (i + 1) % cfg.kd_grad_accum == 0:
+                if torch.isnan(loss).any() or accumulation_loss != accumulation_loss:
+                    print(f"\n  [WARN] NaN at step {step}, skipping batch")
+                    optimizer.zero_grad()
+                    accumulation_loss = 0.0
+                    continue
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                 optimizer.step()
                 scheduler.step()
