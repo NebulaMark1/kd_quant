@@ -56,10 +56,11 @@ def _patch_attention_type(gptq_model):
     """Monkey-patch Qwen2Model.forward so decoder_layer.attention_type
     is accessed safely, avoiding AttributeError when auto_gptq's
     LayerHijacker wraps decoder layers (transformers >= 4.45)."""
-    inner = getattr(gptq_model, "model", None)
-    if inner is None:
-        return
-    if type(inner).__name__ != "Qwen2Model":
+    # gptq_model.model = Qwen2ForCausalLM
+    # gptq_model.model.model = Qwen2Model
+    outer = getattr(gptq_model, "model", None)
+    inner = getattr(outer, "model", None) if outer is not None else None
+    if inner is None or not hasattr(inner, "layers"):
         return
 
     import types
