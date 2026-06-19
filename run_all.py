@@ -21,13 +21,12 @@ from datetime import datetime
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
 from auto_gptq import AutoGPTQForCausalLM
 
 from config import ExperimentConfig
 from data_utils import load_eval_datasets, load_calibration_data, load_kd_train_data
 from quantize import run_quantize, QuantResult
-from kd_train import train_offline_kd, train_online_kd
+from kd_train import train_offline_kd, train_online_kd, _load_lora_weights
 from evaluate import evaluate_model
 
 
@@ -40,8 +39,7 @@ def _load_gptq_model(gptq_path: str):
 
 def _load_gptq_with_lora(base_path: str, lora_path: str):
     model = _load_gptq_model(base_path)
-    model = PeftModel.from_pretrained(model, lora_path)
-    model.eval()
+    model, _ = _load_lora_weights(model, lora_path, None)
     return model
 
 
