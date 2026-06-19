@@ -91,14 +91,30 @@ def _load_gsm8k(tokenizer: PreTrainedTokenizer, split: str = "test") -> Dataset:
     return Dataset.from_list(data)
 
 
-def load_math500(tokenizer: PreTrainedTokenizer) -> Dataset:
+def load_math500(tokenizer: PreTrainedTokenizer, max_per_level: int = 20) -> Dataset:
+    """Load MATH-500, stratified sample: `max_per_level` per level (1-5). ~100 total."""
+    import random
     ds = load_dataset("HuggingFaceH4/MATH-500", split="test", cache_dir="./cache")
+    by_level = {1: [], 2: [], 3: [], 4: [], 5: []}
+    for item in ds:
+        level = int(item["level"])
+        if level in by_level:
+            by_level[level].append(item)
+
+    sampled = []
+    for level in range(1, 6):
+        pool = by_level[level]
+        random.seed(42)
+        random.shuffle(pool)
+        sampled.extend(pool[:max_per_level])
+
+    original_level_order = {item["level"]: idx for idx, item in enumerate(sampled)}
     data = []
-    for i, item in enumerate(ds):
+    for i, item in enumerate(sampled):
         question = item["problem"]
         answer = item["answer"].strip()
         data.append({
-            "id": f"math500-{i}",
+            "id": f"math-l{item['level']}-{i}",
             "problem": question,
             "answer": answer,
             "prompt": _format_instruct_prompt(
@@ -113,8 +129,6 @@ def load_math500(tokenizer: PreTrainedTokenizer) -> Dataset:
 
 def load_eval_datasets(tokenizer: PreTrainedTokenizer):
     return {
-        "aime": load_aime(tokenizer),
-        "gsm8k": _load_gsm8k(tokenizer),
         "math500": load_math500(tokenizer),
     }
 
