@@ -36,7 +36,7 @@ class ExperimentConfig:
     kd_max_steps: int = 500
     kd_temperature: float = 3.0
     kd_alpha_kl: float = 0.5
-    kd_train_samples: int = 10000
+    kd_train_samples: int = 3000
     kd_warmup_ratio: float = 0.05
     kd_weight_decay: float = 0.01
     kd_lr_scheduler: str = "cosine"
