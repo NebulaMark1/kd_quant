@@ -52,6 +52,28 @@ def _save_model(model: torch.nn.Module, tokenizer: PreTrainedTokenizer, path: st
     tokenizer.save_pretrained(path)
 
 
+def _patch_attention_type(gptq_model):
+    """Monkey-patch Qwen2Model.forward so decoder_layer.attention_type
+    is accessed safely, avoiding AttributeError when auto_gptq's
+    LayerHijacker wraps decoder layers (transformers >= 4.45)."""
+    inner = getattr(gptq_model, "model", None)
+    if inner is None:
+        return
+    if type(inner).__name__ != "Qwen2Model":
+        return
+
+    import types
+    _orig_forward = inner.forward
+
+    def _patched_forward(self, input_ids=None, attention_mask=None, **kwargs):
+        for layer in self.layers:
+            if not hasattr(layer, "attention_type"):
+                layer.attention_type = "full"
+        return _orig_forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+
+    inner.forward = types.MethodType(_patched_forward, inner)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # GPTQ
 # ═══════════════════════════════════════════════════════════════════════
@@ -92,6 +114,9 @@ def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
         trust_remote_code=True,
         cache_dir=cfg.cache_dir,
     )
+    # Patch: newer transformers Qwen2Model expects decoder_layer.attention_type,
+    # but auto_gptq's LayerHijacker doesn't forward it.
+    _patch_attention_type(gptq_model)
     gptq_model.quantize(calib_examples, use_triton=False)
     gptq_model.save_quantized(save_path)
     tokenizer.save_pretrained(save_path)
