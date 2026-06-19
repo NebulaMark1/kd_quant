@@ -65,7 +65,10 @@ def _get_target_modules(model: nn.Module, target_names: list[str]) -> dict[str, 
 
 
 def _wrap_model_with_lora(model: nn.Module, cfg: ExperimentConfig) -> tuple[nn.Module, dict[str, _GptqLoraLayer]]:
-    from auto_gptq.nn_modules.qlinear import QuantLinear
+    try:
+        from auto_gptq.nn_modules.qlinear import QuantLinear
+    except ImportError:
+        from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear
 
     targets = _get_target_modules(model, cfg.lora_target_modules)
     lora_layers = {}
@@ -116,7 +119,10 @@ def _save_lora_weights(lora_layers: dict[str, _GptqLoraLayer], save_dir: str):
 
 
 def _load_lora_weights(model: nn.Module, save_dir: str, cfg: ExperimentConfig):
-    from auto_gptq.nn_modules.qlinear import QuantLinear
+    try:
+        from auto_gptq.nn_modules.qlinear import QuantLinear
+    except ImportError:
+        from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear
 
     with open(f"{save_dir}/lora_config.json") as f:
         lora_cfg = json.load(f)
