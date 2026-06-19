@@ -70,36 +70,6 @@ def _format_instruct_prompt(question: str, tokenizer: PreTrainedTokenizer) -> st
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def load_aime2024(tokenizer: PreTrainedTokenizer) -> Dataset:
-    data = []
-    for i, item in enumerate(AIME2024_PROBLEMS):
-        data.append({
-            "id": f"aime2024-{i+1}",
-            "problem": item["problem"],
-            "answer": item["answer"],
-            "prompt": _format_instruct_prompt(item["problem"], tokenizer),
-        })
-    return Dataset.from_list(data)
-
-
-def load_aime2025(tokenizer: PreTrainedTokenizer) -> Dataset:
-    data = []
-    for i, item in enumerate(AIME2025_1_PROBLEMS):
-        data.append({
-            "id": f"aime2025-{i+1}",
-            "problem": item["problem"],
-            "answer": item["answer"],
-            "prompt": _format_instruct_prompt(item["problem"], tokenizer),
-        })
-    return Dataset.from_list(data)
-
-
-def load_aime(tokenizer: PreTrainedTokenizer) -> Dataset:
-    ds2024 = load_aime2024(tokenizer)
-    ds2025 = load_aime2025(tokenizer)
-    return concatenate_datasets([ds2024, ds2025])
-
-
 def _load_gsm8k(tokenizer: PreTrainedTokenizer, split: str = "test") -> Dataset:
     ds = load_dataset("gsm8k", "main", split=split, cache_dir="./cache")
     data = []
