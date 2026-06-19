@@ -207,7 +207,7 @@ def _load_teacher(cfg: ExperimentConfig):
     teacher = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         torch_dtype=torch.float16,
-        device_map="auto",
+        device_map=DEVICE,
         trust_remote_code=True,
         cache_dir=cfg.cache_dir,
     )
