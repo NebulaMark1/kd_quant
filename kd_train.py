@@ -40,8 +40,10 @@ class _GptqLoraLayer(nn.Module):
 
         in_features = base_module.infeatures
         out_features = base_module.outfeatures
-        self.lora_A = nn.Linear(in_features, r, bias=False)
-        self.lora_B = nn.Linear(r, out_features, bias=False)
+        param = next(base_module.parameters())
+        dtype = param.dtype if param.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        self.lora_A = nn.Linear(in_features, r, bias=False, dtype=dtype)
+        self.lora_B = nn.Linear(r, out_features, bias=False, dtype=dtype)
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B.weight)
 
