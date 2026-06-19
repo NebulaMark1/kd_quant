@@ -45,7 +45,7 @@ def _load_gptq_with_lora(base_path: str, lora_path: str):
 
 def _ensure_gptq_ready(cfg, calib_ds, tokenizer, eval_ds, all_metrics, args):
     """Ensure GPTQ model exists on disk. Run Group B if needed."""
-    gptq_path = f"{cfg.models_dir}/gptq_w4a16"
+    gptq_path = f"{cfg.models_dir}/gptq_w{cfg.bits}a16"
     gptq_ready = Path(gptq_path).exists() and (Path(gptq_path) / "quantize_config.json").exists()
 
     if not gptq_ready:
@@ -161,7 +161,7 @@ def main():
     # ── Group E: GPTQ + Online KD ──
     if "E" in args.groups and not args.skip_kd:
         print("\n[5b/6] Group E: GPTQ + Online KD ...")
-        gptq_path = f"{cfg.models_dir}/gptq_w4a16"
+        gptq_path = f"{cfg.models_dir}/gptq_w{cfg.bits}a16"
         gptq_model_fresh = _load_gptq_model(gptq_path)
         qr_fresh = QuantResult(gptq_model_fresh, gptq_path, "gptq")
         base_path, lora_path = train_online_kd(cfg, train_ds, qr_fresh)

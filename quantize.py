@@ -82,7 +82,7 @@ def _patch_attention_type(gptq_model):
 # ═══════════════════════════════════════════════════════════════════════
 
 def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
-    save_path = f"{cfg.models_dir}/gptq_w4a16"
+    save_path = f"{cfg.models_dir}/gptq_w{cfg.bits}a16"
 
     if Path(save_path).exists() and (Path(save_path) / "quantize_config.json").exists():
         from auto_gptq import AutoGPTQForCausalLM
