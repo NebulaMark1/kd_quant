@@ -68,13 +68,13 @@ def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
         model.eval()
         return QuantResult(model, save_path, "gptq")
 
-    tokenizer = _load_tokenizer(cfg)
-
     from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
 
-    calib_texts = [
-        tokenizer.decode(s["input_ids"], skip_special_tokens=True)
-        for s in calib_ds.select(range(min(cfg.calib_samples, len(calib_ds))))
+    calib_data = calib_ds.select(range(min(cfg.calib_samples, len(calib_ds))))
+    # auto_gptq expects list of dicts with "input_ids" and "attention_mask"
+    calib_examples = [
+        {"input_ids": s["input_ids"], "attention_mask": s["attention_mask"]}
+        for s in calib_data
     ]
 
     quantize_config = BaseQuantizeConfig(
@@ -83,6 +83,7 @@ def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
         desc_act=cfg.desc_act,
     )
 
+    tokenizer = _load_tokenizer(cfg)
     gptq_model = AutoGPTQForCausalLM.from_pretrained(
         cfg.model_name,
         quantize_config=quantize_config,
@@ -91,7 +92,7 @@ def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
         trust_remote_code=True,
         cache_dir=cfg.cache_dir,
     )
-    gptq_model.quantize(calib_texts, use_triton=False)
+    gptq_model.quantize(calib_examples, use_triton=False)
     gptq_model.save_quantized(save_path)
     tokenizer.save_pretrained(save_path)
 
