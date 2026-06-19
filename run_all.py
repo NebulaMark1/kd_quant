@@ -51,9 +51,8 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     eval_ds = load_eval_datasets(tokenizer)
-    print(f"  AIME:    {len(eval_ds['aime'])} problems")
-    print(f"  GSM8K:   {len(eval_ds['gsm8k'])} problems")
-    print(f"  MATH500: {len(eval_ds['math500'])} problems")
+    for name, ds in eval_ds.items():
+        print(f"  {name}: {len(ds)} problems")
 
     all_metrics = {}
 
@@ -163,15 +162,17 @@ def main():
 
     # ── Save summary ──
     print("\n[6/6] Results summary:")
-    print("=" * 85)
-    print(f"{'Group':<24s} {'AIME':>10s} {'GSM8K':>10s} {'MATH500':>10s}")
-    print("-" * 85)
+    ds_names = sorted({n for m in all_metrics.values() for n in m})
+    col_w = 12
+    header = f"{'Group':<24s}" + "".join(f"{n:>{col_w}s}" for n in ds_names)
+    sep = f"{'-'*24}" + f"{'-'*col_w}" * len(ds_names)
+    print(sep)
+    print(header)
+    print(sep)
     for group_name, metrics in all_metrics.items():
-        aime_acc = metrics.get("aime", {}).get("accuracy", 0)
-        gsm8k_acc = metrics.get("gsm8k", {}).get("accuracy", 0)
-        math_acc = metrics.get("math500", {}).get("accuracy", 0)
-        print(f"{group_name:<24s} {aime_acc:10.4f} {gsm8k_acc:10.4f} {math_acc:10.4f}")
-    print("=" * 85)
+        vals = "".join(f"{metrics.get(n, {}).get('accuracy', 0):{col_w}.4f}" for n in ds_names)
+        print(f"{group_name:<24s}{vals}")
+    print(sep)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary_path = f"{cfg.results_dir}/summary_{timestamp}.json"
