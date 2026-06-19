@@ -22,12 +22,59 @@ from datetime import datetime
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
+from auto_gptq import AutoGPTQForCausalLM
 
 from config import ExperimentConfig
 from data_utils import load_eval_datasets, load_calibration_data, load_kd_train_data
 from quantize import run_quantize, QuantResult
 from kd_train import train_offline_kd, train_online_kd
 from evaluate import evaluate_model
+
+
+def _load_gptq_model(gptq_path: str):
+    """Load a GPTQ model using auto_gptq (avoids optimum QuantizeConfig bug)."""
+    model = AutoGPTQForCausalLM.from_quantized(gptq_path, device_map="auto", use_triton=False)
+    model.eval()
+    return model
+
+
+def _load_gptq_with_lora(base_path: str, lora_path: str):
+    model = _load_gptq_model(base_path)
+    model = PeftModel.from_pretrained(model, lora_path)
+    model.eval()
+    return model
+
+
+def _ensure_gptq_ready(cfg, calib_ds, tokenizer, eval_ds, all_metrics, args):
+    """Ensure GPTQ model exists on disk. Run Group B if needed."""
+    gptq_path = f"{cfg.models_dir}/gptq_w4a16"
+    gptq_ready = Path(gptq_path).exists() and (Path(gptq_path) / "quantize_config.json").exists()
+
+    if not gptq_ready:
+        if args.skip_quant:
+            raise FileNotFoundError(f"GPTQ model not found at {gptq_path} and --skip-quant is set")
+        print("\n[auto] GPTQ model not found, running Group B first ...")
+        qr = run_quantize(cfg, calib_ds, "gptq")
+        model = qr.model
+    else:
+        if "B" in args.groups and not args.skip_quant:
+            print("\n[4a/6] Group B: GPTQ W4A16 (re-quantizing) ...")
+            qr = run_quantize(cfg, calib_ds, "gptq")
+            model = qr.model
+        else:
+            print("\n[4a/6] Group B: GPTQ W4A16 (loaded from cache) ...")
+            qr = QuantResult(_load_gptq_model(gptq_path), gptq_path, "gptq")
+            model = qr.model
+
+    if "B" in args.groups:
+        metrics = evaluate_model(model, tokenizer, eval_ds, cfg, "B_GPTQ")
+        all_metrics["B_GPTQ"] = metrics
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+        return QuantResult(_load_gptq_model(gptq_path), gptq_path, "gptq")
+
+    return qr
 
 
 def main():
@@ -94,45 +141,19 @@ def main():
 
     # ── Group B: GPTQ ──
     if "B" in args.groups and not args.skip_quant:
-        print("\n[4a/6] Group B: GPTQ W4A16 ...")
-        qr_gptq = run_quantize(cfg, calib_ds, "gptq")
-        gptq_model = qr_gptq.model
-        metrics = evaluate_model(gptq_model, tokenizer, eval_ds, cfg, "B_GPTQ")
-        all_metrics["B_GPTQ"] = metrics
-        del gptq_model
-        gc.collect()
-        torch.cuda.empty_cache()
+        qr_gptq = _ensure_gptq_ready(cfg, calib_ds, tokenizer, eval_ds, all_metrics, args)
     else:
         qr_gptq = None
 
-    # ── Group C: AWQ ──
-    if "C" in args.groups and not args.skip_quant:
-        print("\n[4b/6] Group C: AWQ W4A16 ...")
-        qr_awq = run_quantize(cfg, calib_ds, "awq")
-        metrics = evaluate_model(qr_awq.model, tokenizer, eval_ds, cfg, "C_AWQ")
-        all_metrics["C_AWQ"] = metrics
-        del qr_awq
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # Re-run GPTQ for KD groups if needed
-    if args.skip_quant and any(g in args.groups for g in ["D", "E"]):
-        # Load pre-quantized model
-        gptq_path = f"{cfg.models_dir}/gptq_w4a16"
-        gptq_model = AutoModelForCausalLM.from_pretrained(
-            gptq_path, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True,
-        )
-        qr_gptq = QuantResult(gptq_model, gptq_path, "gptq")
+    need_gptq = any(g in args.groups for g in ["D", "E"])
+    if need_gptq and qr_gptq is None:
+        qr_gptq = _ensure_gptq_ready(cfg, calib_ds, tokenizer, eval_ds, all_metrics, args)
 
     # ── Group D: GPTQ + Offline KD ──
     if "D" in args.groups and not args.skip_kd and qr_gptq is not None:
         print("\n[5a/6] Group D: GPTQ + Offline KD ...")
         base_path, lora_path = train_offline_kd(cfg, train_ds, qr_gptq)
-        model_d = AutoModelForCausalLM.from_pretrained(
-            base_path, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True,
-        )
-        model_d = PeftModel.from_pretrained(model_d, lora_path)
-        model_d.eval()
+        model_d = _load_gptq_with_lora(base_path, lora_path)
         metrics = evaluate_model(model_d, tokenizer, eval_ds, cfg, "D_GPTQ_OfflineKD")
         all_metrics["D_GPTQ_OfflineKD"] = metrics
         del model_d
@@ -143,16 +164,10 @@ def main():
     if "E" in args.groups and not args.skip_kd:
         print("\n[5b/6] Group E: GPTQ + Online KD ...")
         gptq_path = f"{cfg.models_dir}/gptq_w4a16"
-        gptq_model_fresh = AutoModelForCausalLM.from_pretrained(
-            gptq_path, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True,
-        )
+        gptq_model_fresh = _load_gptq_model(gptq_path)
         qr_fresh = QuantResult(gptq_model_fresh, gptq_path, "gptq")
         base_path, lora_path = train_online_kd(cfg, train_ds, qr_fresh)
-        model_e = AutoModelForCausalLM.from_pretrained(
-            base_path, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True,
-        )
-        model_e = PeftModel.from_pretrained(model_e, lora_path)
-        model_e.eval()
+        model_e = _load_gptq_with_lora(base_path, lora_path)
         metrics = evaluate_model(model_e, tokenizer, eval_ds, cfg, "E_GPTQ_OnlineKD")
         all_metrics["E_GPTQ_OnlineKD"] = metrics
         del model_e, gptq_model_fresh
