@@ -69,7 +69,9 @@ def _patch_attention_type(gptq_model):
     def _patched_forward(self, input_ids=None, attention_mask=None, **kwargs):
         for layer in self.layers:
             if not hasattr(layer, "attention_type"):
-                layer.attention_type = "full"
+                # Get actual type from the wrapped module (LayerHijacker.module)
+                orig = getattr(layer, "module", None)
+                layer.attention_type = getattr(orig, "attention_type", "sdpa")
         return _orig_forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
     inner.forward = types.MethodType(_patched_forward, inner)
