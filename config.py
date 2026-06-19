@@ -11,7 +11,7 @@ class ExperimentConfig:
     # ── Quantization ──
     bits: int = 4
     group_size: int = 128
-    desc_act: bool = True
+    desc_act: bool = False  # True breaks Qwen2.5 RoPE during quantization
 
     # ── Calibration ──
     calib_dataset: str = "allenai/c4"
