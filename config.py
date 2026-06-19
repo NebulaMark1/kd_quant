@@ -28,8 +28,8 @@ class ExperimentConfig:
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
     ])
-    kd_max_length: int = 2048
-    kd_batch_size: int = 4
+    kd_max_length: int = 1024
+    kd_batch_size: int = 2
     kd_grad_accum: int = 4
     kd_learning_rate: float = 2e-4
     kd_num_epochs: int = 1
