@@ -69,7 +69,22 @@ def _normalize_answer_gsm8k(text: str) -> Optional[str]:
 
 
 def _normalize_answer_math(text: str) -> Optional[str]:
-    """MATH answers are in \\boxed{}. Extract and normalize."""
+    """MATH answers are in \\boxed{}. Extract and normalize.
+
+    For Qwen3-style models that use <think>...</think> chains, first
+    strip the thinking block and look for the final answer after it.
+    """
+    # Strip Qwen3-style thinking blocks
+    text_clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Also try stripping everything before the last </think> if present
+    if "</think>" in text_clean:
+        text_clean = text_clean.split("</think>")[-1].strip()
+
+    # Try \boxed{} first
+    boxed = _extract_boxed(text_clean)
+    if boxed:
+        return boxed.strip()
+    # Fallback: try the original text
     boxed = _extract_boxed(text)
     if boxed:
         return boxed.strip()

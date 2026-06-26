@@ -67,7 +67,10 @@ def _format_instruct_prompt(question: str, tokenizer: PreTrainedTokenizer) -> st
         {"role": "system", "content": "You are a helpful math assistant. Solve the problem step by step. Put your final answer in \\boxed{}."},
         {"role": "user", "content": question},
     ]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+        enable_thinking=False,  # Qwen3: skip <think> chain, answer directly
+    )
 
 
 def _load_gsm8k(tokenizer: PreTrainedTokenizer, split: str = "test") -> Dataset:
@@ -159,32 +162,100 @@ def load_calibration_data(cfg: ExperimentConfig, tokenizer: PreTrainedTokenizer)
 
 
 def load_kd_train_data(cfg: ExperimentConfig, tokenizer: PreTrainedTokenizer) -> Dataset:
-    """Load training data for KD (more data than calibration)."""
+    """Load math reasoning data for KD training (teacher forcing on answers)."""
+    import random
+
+    samples = _load_math_kd_samples(tokenizer, cfg.kd_max_length, cfg.kd_train_samples)
+    if len(samples) >= 50:
+        print(f"  Math KD samples: {len(samples)}")
+        random.seed(cfg.calib_seed)
+        random.shuffle(samples)
+        return Dataset.from_list(samples[:cfg.kd_train_samples])
+
+    # Fallback: C4 text
+    print("  Falling back to C4 text...")
     try:
         ds = load_dataset(cfg.calib_dataset, cfg.calib_subset, split="train", cache_dir=cfg.cache_dir, streaming=True)
     except Exception:
         ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=cfg.cache_dir, streaming=True)
-
-    samples = []
-    for i, item in enumerate(ds):
+    text_samples = []
+    for item in ds:
         text = item.get("text", "") or item.get("content", "")
         if not text or len(text.strip()) < 100:
             continue
         tokens = tokenizer.encode(text, truncation=True, max_length=cfg.kd_max_length)
         if len(tokens) >= 128:
-            samples.append(tokens)
-        if len(samples) >= cfg.kd_train_samples:
+            text_samples.append(tokens)
+        if len(text_samples) >= cfg.kd_train_samples:
             break
-
     random.seed(cfg.calib_seed)
-    random.shuffle(samples)
-
-    processed = []
-    for tokens in samples:
-        processed.append({
-            "input_ids": tokens,
-            "attention_mask": [1] * len(tokens),
-            "labels": tokens.copy(),
-        })
-
+    random.shuffle(text_samples)
+    processed = [{"input_ids": t, "attention_mask": [1]*len(t), "labels": t.copy()} for t in text_samples]
     return Dataset.from_list(processed)
+
+
+def _load_math_kd_samples(tokenizer, max_length: int, max_samples: int) -> list[dict]:
+    """Short-answer math KD data: train on final answers, not full solutions.
+
+    Full step-by-step solutions are too long for KD (overwhelm LoRA
+    capacity via truncation).  We extract only the final answer (number
+    or boxed expression), which keeps the training signal focused on
+    the numeric/expression output the model actually needs to produce.
+    """
+    import re, random
+    samples = []
+    seen = set()
+
+    def _make_sample(q: str, answer_text: str):
+        prompt = _format_instruct_prompt(q, tokenizer)
+        ans = answer_text + tokenizer.eos_token
+        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        ans_ids = tokenizer.encode(ans, add_special_tokens=False)
+        full_ids = (prompt_ids + ans_ids)[:max_length]
+        p_len = len(prompt_ids)
+        if len(full_ids) >= 16 and p_len < len(full_ids):
+            labels = [-100] * p_len + full_ids[p_len:]
+            if len(labels) == len(full_ids):
+                key = q[:100]
+                if key not in seen:
+                    seen.add(key)
+                    return {"input_ids": full_ids, "labels": labels,
+                            "attention_mask": [1] * len(full_ids)}
+        return None
+
+    # ── GSM8K: extract "#### number" ──
+    try:
+        gsm = load_dataset("gsm8k", "main", split="train", cache_dir="./cache")
+        for item in gsm:
+            q = item["question"].strip()
+            a_raw = item["answer"].strip()
+            m = re.search(r"####\s*(.+?)$", a_raw, re.MULTILINE)
+            ans = m.group(1).strip() if m else a_raw.split("\n")[-1].strip()
+            s = _make_sample(q, ans)
+            if s: samples.append(s)
+        print(f"  GSM8K: {len(samples)} short-answer samples")
+    except Exception as e:
+        print(f"  GSM8K skipped: {e}")
+
+    # ── MATH: extract \boxed{...} ──
+    try:
+        math_ds = load_dataset("hendrycks/competition_math", split="train",
+                               cache_dir="./cache")
+        random.seed(42)
+        idxs = random.sample(range(len(math_ds)),
+                             min(len(math_ds), max_samples))
+        for idx in idxs:
+            if len(samples) >= max_samples:
+                break
+            item = math_ds[idx]
+            q = item["problem"].strip()
+            a = item["solution"].strip()
+            m = re.search(r"\\boxed\{([^}]+)\}", a)
+            ans = m.group(1).strip() if m else a.split("\n")[-1].strip()
+            s = _make_sample(q, ans)
+            if s: samples.append(s)
+        print(f"  MATH: {len(samples)} total (target {max_samples})")
+    except Exception as e:
+        print(f"  MATH skipped: {e}")
+
+    return samples[:max_samples]

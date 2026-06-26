@@ -28,7 +28,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class _GptqLoraLayer(nn.Module):
-    """Minimal LoRA wrapper around a QuantLinear layer (PEFT doesn't support it)."""
+    """Minimal LoRA wrapper around a GPTQ QuantLinear layer."""
 
     def __init__(self, base_module: nn.Module, r: int, alpha: int, dropout: float):
         super().__init__()
@@ -38,19 +38,26 @@ class _GptqLoraLayer(nn.Module):
         self.scaling = alpha / r
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        in_features = base_module.infeatures
-        out_features = base_module.outfeatures
-        dtype = getattr(base_module, "scales", torch.float16).dtype
+        # Derive in/out features from scales layout:
+        #   scales = [in_features // group_size, out_features]
+        # This is true for BOTH TorchLinear and ExllamaV2Linear.
+        gs = base_module.group_size
+        s0, s1 = base_module.scales.shape[0], base_module.scales.shape[1]
+        in_features = s0 * gs
+        out_features = s1
+        dtype = base_module.scales.dtype
         if dtype not in (torch.float16, torch.bfloat16):
             dtype = torch.float16
         self.lora_A = nn.Linear(in_features, r, bias=False, dtype=dtype)
         self.lora_B = nn.Linear(r, out_features, bias=False, dtype=dtype)
-        nn.init.normal_(self.lora_A.weight, std=0.01)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.base(x)
-        lora_out = self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
+        lora_dtype = self.lora_A.weight.dtype
+        x_lora = self.dropout(x).to(lora_dtype)
+        lora_out = self.lora_B(self.lora_A(x_lora)) * self.scaling
         return base_out + lora_out.to(base_out.dtype)
 
     @property
@@ -68,16 +75,13 @@ def _get_target_modules(model: nn.Module, target_names: list[str]) -> dict[str, 
 
 
 def _wrap_model_with_lora(model: nn.Module, cfg: ExperimentConfig) -> tuple[nn.Module, dict[str, _GptqLoraLayer]]:
-    try:
-        from auto_gptq.nn_modules.qlinear import QuantLinear
-    except ImportError:
-        from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear
+    from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
     targets = _get_target_modules(model, cfg.lora_target_modules)
     lora_layers = {}
 
     for full_name, module in list(targets.items()):
-        if not isinstance(module, QuantLinear):
+        if not isinstance(module, BaseQuantLinear):
             continue
         lora = _GptqLoraLayer(module, cfg.lora_r, cfg.lora_alpha, cfg.lora_dropout)
         lora.to(DEVICE)
@@ -97,7 +101,9 @@ def _wrap_model_with_lora(model: nn.Module, cfg: ExperimentConfig) -> tuple[nn.M
         lora.lora_A.weight.requires_grad = True
         lora.lora_B.weight.requires_grad = True
 
+    # TorchLinear supports training mode — just set the whole model
     model.train()
+    # But only LoRA params have requires_grad=True
     try:
         model.config.use_cache = False
     except Exception:
@@ -105,58 +111,33 @@ def _wrap_model_with_lora(model: nn.Module, cfg: ExperimentConfig) -> tuple[nn.M
     return model, lora_layers
 
 
-def _save_lora_weights(lora_layers: dict[str, _GptqLoraLayer], save_dir: str):
-    state = {}
-    for name, lora in lora_layers.items():
-        state[f"{name}.lora_A"] = lora.lora_A.state_dict()
-        state[f"{name}.lora_B"] = lora.lora_B.state_dict()
+def _save_lora_weights(lora_layers: dict[str, _GptqLoraLayer], save_dir: str, model_dir: str):
     os.makedirs(save_dir, exist_ok=True)
-    torch.save(state, f"{save_dir}/lora_weights.pt")
-    config = {
-        "r": list(lora_layers.values())[0].r,
-        "alpha": list(lora_layers.values())[0].alpha,
-        "target_modules": list(lora_layers.keys()),
+    r = list(lora_layers.values())[0].r
+    # GPTQModel loads adapter from the model directory.  Save weights there
+    # so that local-path resolution doesn't try to treat it as a HF repo id.
+    # Flatten to {module.lora_A: tensor, ...} for safetensors
+    flat_weights = {}
+    for name, lora in lora_layers.items():
+        flat_weights[f"{name}.lora_A"] = lora.lora_A.weight.data.cpu().contiguous()
+        flat_weights[f"{name}.lora_B"] = lora.lora_B.weight.data.cpu().contiguous()
+    abs_model_dir = os.path.abspath(model_dir)
+    from safetensors.torch import save_file
+    save_file(flat_weights, f"{abs_model_dir}/adapter_model.safetensors")
+    # Two-level config:
+    # 1. Outer adapter payload (for GPTQModel.normalize_adapter):
+    #    {"name": "lora", "rank": r, "path": "..."}
+    # 2. adapter_config.json at `path` (for LoraConfig.from_pretrained):
+    #    {"r": r, "lora_alpha": ..., ...}  ← PEFT-style
+    outer_cfg = {"name": "lora", "rank": r, "path": abs_model_dir}
+    peft_cfg = {
+        "r": r, "lora_alpha": r, "lora_dropout": 0.05,
+        "target_modules": "all-linear", "bias": "none",
     }
-    with open(f"{save_dir}/lora_config.json", "w") as f:
-        json.dump(config, f, indent=2)
-
-
-def _load_lora_weights(model: nn.Module, save_dir: str, cfg: ExperimentConfig):
-    try:
-        from auto_gptq.nn_modules.qlinear import QuantLinear
-    except ImportError:
-        from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear
-
-    with open(f"{save_dir}/lora_config.json") as f:
-        lora_cfg = json.load(f)
-    r = lora_cfg["r"]
-    alpha = lora_cfg["alpha"]
-    target_names = [name.rsplit(".", 1)[-1] for name in lora_cfg["target_modules"]]
-
-    state = torch.load(f"{save_dir}/lora_weights.pt", weights_only=True, map_location=DEVICE)
-    targets = _get_target_modules(model, target_names)
-    lora_layers = {}
-
-    for full_name, module in targets.items():
-        if not isinstance(module, QuantLinear):
-            continue
-        lora = _GptqLoraLayer(module, r, alpha, 0.0)
-        lora.to(DEVICE)
-        lora.lora_A.load_state_dict(state[f"{full_name}.lora_A"])
-        lora.lora_B.load_state_dict(state[f"{full_name}.lora_B"])
-
-        parts = full_name.rsplit(".", 1)
-        parent = dict(model.named_modules()).get(parts[0]) if len(parts) == 2 else model
-        if parent is not None:
-            setattr(parent, parts[1], lora)
-            lora_layers[full_name] = lora
-
-    model.eval()
-    try:
-        model.config.use_cache = True
-    except Exception:
-        pass
-    return model, lora_layers
+    with open(f"{abs_model_dir}/adapter_config.json", "w") as f:
+        json.dump(peft_cfg, f, indent=2)
+    with open(f"{save_dir}/adapter_config.json", "w") as f:
+        json.dump(outer_cfg, f, indent=2)
 
 
 # ── Data ──────────────────────────────────────────────────────────────
@@ -193,15 +174,44 @@ def _lora_trainable_params(model: nn.Module) -> list[nn.Parameter]:
 def _compute_kd_loss(s_out, t_out, labels, cfg: ExperimentConfig) -> torch.Tensor:
     s_logits = s_out.logits.float()
     t_logits = t_out.logits.float()
+
+    # Clamp extreme logits to prevent NaN in softmax
+    s_logits = torch.clamp(s_logits, -30, 30)
+    t_logits = torch.clamp(t_logits, -30, 30)
+
     loss_ce = F.cross_entropy(
         s_logits.view(-1, s_logits.size(-1)),
         labels.view(-1),
         ignore_index=-100,
     )
+
+    # Align vocab sizes
+    min_vocab = min(s_logits.size(-1), t_logits.size(-1))
+    s_logits = s_logits[..., :min_vocab]
+    t_logits = t_logits[..., :min_vocab]
+
     mask = (labels.view(-1) != -100)
-    s_log = F.log_softmax(s_logits.view(-1, s_logits.size(-1))[mask] / cfg.kd_temperature, dim=-1)
-    t_soft = F.softmax(t_logits.view(-1, t_logits.size(-1))[mask] / cfg.kd_temperature, dim=-1)
-    loss_kl = F.kl_div(s_log, t_soft, reduction="batchmean") * (cfg.kd_temperature ** 2)
+    if mask.sum() == 0:
+        return loss_ce  # no valid tokens for KD
+
+    s_masked = s_logits.view(-1, s_logits.size(-1))[mask]
+    t_masked = t_logits.view(-1, s_logits.size(-1))[mask]
+
+    # Compute KL in chunks to avoid OOM
+    CHUNK = 256
+    kl_sum = torch.tensor(0.0, device=s_logits.device, dtype=torch.float32)
+    total_rows = 0
+    for start in range(0, s_masked.size(0), CHUNK):
+        end = min(start + CHUNK, s_masked.size(0))
+        s_chunk = s_masked[start:end] / cfg.kd_temperature
+        t_chunk = t_masked[start:end] / cfg.kd_temperature
+        kl_sum = kl_sum + F.kl_div(
+            F.log_softmax(s_chunk, dim=-1),
+            F.softmax(t_chunk, dim=-1),
+            reduction="sum",
+        )
+        total_rows += (end - start)
+    loss_kl = (kl_sum / total_rows) * (cfg.kd_temperature ** 2)
     return (1 - cfg.kd_alpha_kl) * loss_ce + cfg.kd_alpha_kl * loss_kl
 
 
@@ -220,11 +230,14 @@ def _load_teacher(cfg: ExperimentConfig):
 
 
 def _run_kd_training(cfg, train_ds, quant_result, teacher, label, shuffle, extra_loss_fn=None):
-    lora_path = f"{cfg.models_dir}/{label}_lora"
-    if Path(lora_path).exists() and (Path(lora_path) / "lora_config.json").exists():
+    lora_path = f"{cfg.models_dir}/{label}_w{cfg.bits}a16_lora"
+    if Path(lora_path).exists() and (Path(lora_path) / "adapter_config.json").exists():
         return quant_result.model_path, lora_path
 
-    student = quant_result.model.to(DEVICE)
+    # Reload model with torch backend for KD training (ExllamaV2 backward is buggy)
+    from gptqmodel import GPTQModel
+    loaded = GPTQModel.from_quantized(quant_result.model_path, backend="torch")
+    student = loaded.model.to(DEVICE)
     student, lora_layers = _wrap_model_with_lora(student, cfg)
     trainable = _lora_trainable_params(student)
 
@@ -260,13 +273,25 @@ def _run_kd_training(cfg, train_ds, quant_result, teacher, label, shuffle, extra
             if extra_loss_fn is not None:
                 loss = loss + extra_loss_fn(s_out, t_out)
 
+            # Check for NaN/Inf BEFORE backward
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"\n  [WARN] Loss NaN at mb {i}, skipping")
+                optimizer.zero_grad()
+                accumulation_loss = 0.0
+                continue
+
             loss = loss / cfg.kd_grad_accum
             loss.backward()
             accumulation_loss += loss.item()
 
             if (i + 1) % cfg.kd_grad_accum == 0:
-                if torch.isnan(loss).any() or accumulation_loss != accumulation_loss:
-                    print(f"\n  [WARN] NaN at step {step}, skipping batch")
+                # Check trainable gradients for NaN before stepping
+                grad_is_nan = any(
+                    p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+                    for p in trainable
+                )
+                if grad_is_nan or accumulation_loss != accumulation_loss:
+                    print(f"\n  [WARN] NaN/Inf grad at step {step}, skipping batch")
                     optimizer.zero_grad()
                     accumulation_loss = 0.0
                     continue
@@ -284,7 +309,7 @@ def _run_kd_training(cfg, train_ds, quant_result, teacher, label, shuffle, extra
 
     progress.close()
 
-    _save_lora_weights(lora_layers, lora_path)
+    _save_lora_weights(lora_layers, lora_path, model_dir=quant_result.model_path)
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, trust_remote_code=True, cache_dir=cfg.cache_dir)
     tokenizer.save_pretrained(lora_path)
 

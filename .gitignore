@@ -6,31 +6,27 @@ __pycache__/
 dist/
 build/
 
-# Models & large binaries
-models/
-output/
-results/
-logs/
-cache/
-*.pt
-*.bin
-*.safetensors
-!adapter_model.safetensors
-
-# Environment
+# Virtual environment
+kd_env/
 venv/
 .venv/
 .env
+
+# Experiment output (models, cache, results, logs)
+kd_quant_experiment/
+cache/
+
+# Models & large binaries
+*.pt
+*.bin
+*.safetensors
 
 # IDE
 .vscode/
 .idea/
 
-# Model files & archives
-Qwen2.5-7B-Instruct/
-Qwen2.5-7B-Instruct.tar
-*.tar
-*.tar.gz
+# Vendored libs (installed separately)
+AutoGPTQ/
 
 # OS
 .DS_Store

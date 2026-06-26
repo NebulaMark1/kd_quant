@@ -52,84 +52,56 @@ def _save_model(model: torch.nn.Module, tokenizer: PreTrainedTokenizer, path: st
     tokenizer.save_pretrained(path)
 
 
-def _patch_attention_type(gptq_model):
-    """Monkey-patch Qwen2Model.forward so decoder_layer.attention_type
-    is accessed safely, avoiding AttributeError when auto_gptq's
-    LayerHijacker wraps decoder layers (transformers >= 4.45)."""
-    # gptq_model.model = Qwen2ForCausalLM
-    # gptq_model.model.model = Qwen2Model
-    outer = getattr(gptq_model, "model", None)
-    inner = getattr(outer, "model", None) if outer is not None else None
-    if inner is None or not hasattr(inner, "layers"):
-        return
-
-    import types
-    _orig_forward = inner.forward
-
-    def _patched_forward(self, input_ids=None, attention_mask=None, **kwargs):
-        for layer in self.layers:
-            if not hasattr(layer, "attention_type"):
-                # Get actual type from the wrapped module (LayerHijacker.module)
-                orig = getattr(layer, "module", None)
-                layer.attention_type = getattr(orig, "attention_type", "sdpa")
-        return _orig_forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-
-    inner.forward = types.MethodType(_patched_forward, inner)
-
-
 # ═══════════════════════════════════════════════════════════════════════
-# GPTQ
+# GPTQ (via GPTQModel)
 # ═══════════════════════════════════════════════════════════════════════
 
 def quantize_gptq(cfg: ExperimentConfig, calib_ds: Dataset) -> QuantResult:
+    from gptqmodel import GPTQModel, QuantizeConfig
+
     save_path = f"{cfg.models_dir}/gptq_w{cfg.bits}a16"
 
     if Path(save_path).exists() and (Path(save_path) / "quantize_config.json").exists():
-        from auto_gptq import AutoGPTQForCausalLM
         tokenizer = _load_tokenizer(cfg)
-        model = AutoGPTQForCausalLM.from_quantized(
-            save_path, device_map="auto", use_triton=False,
-        )
+        loaded = GPTQModel.from_quantized(save_path, backend="exllama_v2")
+        model = loaded.model
         model.eval()
         return QuantResult(model, save_path, "gptq")
 
-    from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-
+    tokenizer = _load_tokenizer(cfg)
     calib_data = calib_ds.select(range(min(cfg.calib_samples, len(calib_ds))))
-    # auto_gptq expects list of dicts with "input_ids" and "attention_mask"
-    calib_examples = [
-        {"input_ids": s["input_ids"], "attention_mask": s["attention_mask"]}
-        for s in calib_data
-    ]
 
-    quantize_config = BaseQuantizeConfig(
+    # GPTQModel expects list of dicts with lists (not tensors)
+    calib_examples = []
+    for s in calib_data:
+        calib_examples.append({
+            "input_ids": s["input_ids"].tolist() if hasattr(s["input_ids"], "tolist") else s["input_ids"],
+            "attention_mask": s["attention_mask"].tolist() if hasattr(s["attention_mask"], "tolist") else s["attention_mask"],
+        })
+
+    quantize_config = QuantizeConfig(
         bits=cfg.bits,
         group_size=cfg.group_size,
         desc_act=cfg.desc_act,
     )
 
-    tokenizer = _load_tokenizer(cfg)
-    gptq_model = AutoGPTQForCausalLM.from_pretrained(
+    gptq_model = GPTQModel.from_pretrained(
         cfg.model_name,
         quantize_config=quantize_config,
-        torch_dtype=torch.float16,
-        device_map="auto",
         trust_remote_code=True,
-        cache_dir=cfg.cache_dir,
     )
-    # Patch: newer transformers Qwen2Model expects decoder_layer.attention_type,
-    # but auto_gptq's LayerHijacker doesn't forward it.
-    _patch_attention_type(gptq_model)
-    gptq_model.quantize(calib_examples, use_triton=False)
-    gptq_model.save_quantized(save_path)
+    gptq_model.quantize(calib_examples)
+    gptq_model.save(save_path)
     tokenizer.save_pretrained(save_path)
 
     del gptq_model
     torch.cuda.empty_cache()
 
-    gptq_model = AutoGPTQForCausalLM.from_quantized(save_path, device_map="auto", use_triton=False)
-    gptq_model.eval()
-    return QuantResult(gptq_model, save_path, "gptq")
+    # Return the raw HF model with fast kernel backend
+    loaded = GPTQModel.from_quantized(save_path, backend="exllama_v2")
+    model = loaded.model
+    model.eval()
+    return QuantResult(model, save_path, "gptq")
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -21,26 +21,31 @@ from datetime import datetime
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from auto_gptq import AutoGPTQForCausalLM
+from gptqmodel import GPTQModel
 
 from config import ExperimentConfig
 from data_utils import load_eval_datasets, load_calibration_data, load_kd_train_data
 from quantize import run_quantize, QuantResult
-from kd_train import train_offline_kd, train_online_kd, _load_lora_weights
+from kd_train import train_offline_kd, train_online_kd
 from evaluate import evaluate_model
 
 
-def _load_gptq_model(gptq_path: str):
-    """Load a GPTQ model using auto_gptq (avoids optimum QuantizeConfig bug)."""
-    model = AutoGPTQForCausalLM.from_quantized(gptq_path, device_map="auto", use_triton=False)
+def _load_gptq_model(gptq_path: str, backend: str = "exllama_v2"):
+    """Load a GPTQ model using GPTQModel."""
+    loaded = GPTQModel.from_quantized(gptq_path, backend=backend)
+    model = loaded.model  # raw HF model with QuantLinear layers
     model.eval()
     return model
 
 
 def _load_gptq_with_lora(base_path: str, lora_path: str):
-    model = _load_gptq_model(base_path)
-    model, _ = _load_lora_weights(model, lora_path, None)
-    return model
+    """Load GPTQ model with LoRA adapter merged via GPTQModel native API."""
+    import json
+    with open(f"{lora_path}/adapter_config.json") as f:
+        adapter_cfg = json.load(f)
+    # adapter_cfg["path"] is the model dir where adapter_model.pt lives
+    loaded = GPTQModel.from_quantized(base_path, adapter=adapter_cfg, backend="exllama_v2")
+    return loaded.model
 
 
 def _ensure_gptq_ready(cfg, calib_ds, tokenizer, eval_ds, all_metrics, args):
@@ -56,17 +61,18 @@ def _ensure_gptq_ready(cfg, calib_ds, tokenizer, eval_ds, all_metrics, args):
         model = qr.model
     else:
         if "B" in args.groups and not args.skip_quant:
-            print("\n[4a/6] Group B: GPTQ W4A16 (re-quantizing) ...")
+            print(f"\n[4a/6] Group B: GPTQ W{cfg.bits}A16 (re-quantizing) ...")
             qr = run_quantize(cfg, calib_ds, "gptq")
             model = qr.model
         else:
-            print("\n[4a/6] Group B: GPTQ W4A16 (loaded from cache) ...")
+            print(f"\n[4a/6] Group B: GPTQ W{cfg.bits}A16 (loaded from cache) ...")
             qr = QuantResult(_load_gptq_model(gptq_path), gptq_path, "gptq")
             model = qr.model
 
     if "B" in args.groups:
-        metrics = evaluate_model(model, tokenizer, eval_ds, cfg, "B_GPTQ")
-        all_metrics["B_GPTQ"] = metrics
+        b_label = f"B_GPTQ_W{cfg.bits}A16"
+        metrics = evaluate_model(model, tokenizer, eval_ds, cfg, b_label)
+        all_metrics[b_label] = metrics
         del model
         gc.collect()
         torch.cuda.empty_cache()
@@ -81,10 +87,14 @@ def main():
     parser.add_argument("--skip-kd", action="store_true")
     parser.add_argument("--skip-eval-fp16", action="store_true")
     parser.add_argument("--groups", nargs="+", default=["A", "B", "D", "E"])
+    parser.add_argument("--bits", type=int, default=None, help="Override quantization bits (e.g. 4)")
     args = parser.parse_args()
 
     cfg = ExperimentConfig()
+    if args.bits is not None:
+        cfg.bits = args.bits
     print(f"Model: {cfg.model_name}")
+    print(f"Bits: {cfg.bits}, Group size: {cfg.group_size}")
     print(f"Groups: {args.groups}")
     print(f"Output: {cfg.output_dir}")
     print(f"Results: {cfg.results_dir}")
@@ -149,11 +159,12 @@ def main():
 
     # ── Group D: GPTQ + Offline KD ──
     if "D" in args.groups and not args.skip_kd and qr_gptq is not None:
-        print("\n[5a/6] Group D: GPTQ + Offline KD ...")
+        print(f"\n[5a/6] Group D: GPTQ W{cfg.bits}A16 + Offline KD ...")
         base_path, lora_path = train_offline_kd(cfg, train_ds, qr_gptq)
         model_d = _load_gptq_with_lora(base_path, lora_path)
-        metrics = evaluate_model(model_d, tokenizer, eval_ds, cfg, "D_GPTQ_OfflineKD")
-        all_metrics["D_GPTQ_OfflineKD"] = metrics
+        d_label = f"D_GPTQ_OfflineKD_W{cfg.bits}A16"
+        metrics = evaluate_model(model_d, tokenizer, eval_ds, cfg, d_label)
+        all_metrics[d_label] = metrics
         del model_d
         gc.collect()
         torch.cuda.empty_cache()
@@ -166,8 +177,9 @@ def main():
         qr_fresh = QuantResult(gptq_model_fresh, gptq_path, "gptq")
         base_path, lora_path = train_online_kd(cfg, train_ds, qr_fresh)
         model_e = _load_gptq_with_lora(base_path, lora_path)
-        metrics = evaluate_model(model_e, tokenizer, eval_ds, cfg, "E_GPTQ_OnlineKD")
-        all_metrics["E_GPTQ_OnlineKD"] = metrics
+        e_label = f"E_GPTQ_OnlineKD_W{cfg.bits}A16"
+        metrics = evaluate_model(model_e, tokenizer, eval_ds, cfg, e_label)
+        all_metrics[e_label] = metrics
         del model_e, gptq_model_fresh
         gc.collect()
         torch.cuda.empty_cache()
