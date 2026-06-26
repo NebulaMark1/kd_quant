@@ -15,6 +15,7 @@ venv/
 # Experiment output (models, cache, results, logs)
 kd_quant_experiment/
 cache/
+logs/
 
 # Models & large binaries
 *.pt
